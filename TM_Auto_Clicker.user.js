@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         TM Auto Clicker (gcp.giftee.biz + x.com)
 // @namespace    https://example.local/
-// @version      1.0.0
+// @version      1.0.2
 // @description  Auto click with debug + safety for gcp.giftee.biz and x.com OAuth2.
 // @match        https://gcp.giftee.biz/*
 // @match        https://x.com/*
+// @match        https://present.social-camp.com/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -39,6 +40,10 @@
   const X_DELAY_MIN_MS = 1800;
   const X_DELAY_MAX_MS = 2600;
   const X_GUARD_PREFIX = 'tm_autoclick_xoauth:';
+  // Social Camp redirect
+  const SC_REDIRECT_GUARD_PREFIX = 'tm_autoclick_scjump:';
+  const SC_REDIRECT_USE_REPLACE = true;
+  const SC_REDIRECT_KEEP_QUERY_HASH = true;
 
   const OBSERVER_TIMEOUT_MS = 60000;
   const MAX_ATTEMPTS_PER_PAGE = 3;
@@ -105,6 +110,11 @@
 
   function normalizeText(str) {
     return (str || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function normalizePathname(pathname) {
+    const cleaned = (pathname || '/').replace(/\/+$/, '');
+    return cleaned || '/';
   }
 
   // Detect presence of GCP join wait/error messages that require longer wait
@@ -670,6 +680,54 @@
   }
 
   // ==============================
+  // Phase: Social Camp Lottery Redirect
+  // ==============================
+  function runSocialCampLotteryRedirectPhase() {
+    const label = 'SOCIAL_CAMP_LOTTERY_REDIRECT';
+    state.phase = `${label}:init`;
+
+    const currentUrl = location.href;
+    const normalizedPath = normalizePathname(location.pathname);
+    const guardKey = `${SC_REDIRECT_GUARD_PREFIX}${location.pathname}${location.search}`;
+    state.guardKey = guardKey;
+
+    // Avoid derived paths like /lose/lottery as well
+    if (normalizedPath.includes('/lottery')) {
+      log(`${label}: skip (already /lottery)`, { currentUrl, normalizedPath });
+      return;
+    }
+
+    const segments = normalizedPath.split('/').filter(Boolean);
+    if (segments.length !== 2) {
+      log(`${label}: skip (not base path /{seg1}/{seg2})`, { currentUrl, normalizedPath, segments });
+      return;
+    }
+
+    if (sessionStorage.getItem(guardKey)) {
+      log(`${label}: skip (guard hit)`, { currentUrl, guardKey });
+      return;
+    }
+
+    const newPath = `${normalizedPath}/lottery`;
+    const suffix = SC_REDIRECT_KEEP_QUERY_HASH ? `${location.search}${location.hash}` : '';
+    const newUrl = `${location.origin}${newPath}${suffix}`;
+
+    log(`${label}: redirect`, {
+      currentUrl,
+      normalizedPath,
+      newUrl
+    });
+
+    sessionStorage.setItem(guardKey, Date.now().toString());
+    state.phase = `${label}:redirect`;
+    if (SC_REDIRECT_USE_REPLACE) {
+      location.replace(newUrl);
+    } else {
+      location.assign(newUrl);
+    }
+  }
+
+  // ==============================
   // Manual debug helpers
   // ==============================
   window.tmAutoClickStatus = function tmAutoClickStatus() {
@@ -731,6 +789,11 @@
         } else {
           log('X: path or client_id not matched, skip.');
         }
+        return;
+      }
+
+      if (host === 'present.social-camp.com') {
+        runSocialCampLotteryRedirectPhase();
         return;
       }
 
