@@ -1,11 +1,13 @@
 // ==UserScript==
 // @name         TM Auto Clicker (gcp.giftee.biz + x.com)
 // @namespace    https://example.local/
-// @version      1.0.2
+// @version      1.0.7
 // @description  Auto click with debug + safety for gcp.giftee.biz and x.com OAuth2.
 // @match        https://gcp.giftee.biz/*
 // @match        https://x.com/*
 // @match        https://present.social-camp.com/*
+// @match        https://bbf.shuttlerock.com/*
+// @match        https://x.rakusta.net/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -44,6 +46,14 @@
   const SC_REDIRECT_GUARD_PREFIX = 'tm_autoclick_scjump:';
   const SC_REDIRECT_USE_REPLACE = true;
   const SC_REDIRECT_KEEP_QUERY_HASH = true;
+  const SC_BASE_PATH_RE = /^\/[^/]+\/[^/]+\/?$/;
+  // BBF
+  const BBF_AUTOSCROLL_GUARD_PREFIX = 'tm_bbf_autoscroll_done:';
+  // Rakusta
+  const RAKUSTA_GUARD_PREFIX = 'tm_autoclick_rakusta:';
+  const RAKUSTA_LOADING_GUARD_PREFIX = 'tm_rakusta_loading_clicked:';
+  const RAKUSTA_PATH_PREFIX = '/campaign/';
+  const RAKUSTA_DELAY_MS = 1000;
 
   const OBSERVER_TIMEOUT_MS = 60000;
   const MAX_ATTEMPTS_PER_PAGE = 3;
@@ -80,7 +90,7 @@
     if (DEBUG) console.log(LOG_PREFIX, ...args);
   }
   function info(...args) {
-    console.log(LOG_PREFIX, ...args);
+    if (DEBUG) console.log(LOG_PREFIX, ...args);
   }
   function warn(...args) {
     console.warn(LOG_PREFIX, ...args);
@@ -698,8 +708,13 @@
     }
 
     const segments = normalizedPath.split('/').filter(Boolean);
-    if (segments.length !== 2) {
-      log(`${label}: skip (not base path /{seg1}/{seg2})`, { currentUrl, normalizedPath, segments });
+    if (segments[0] === 'user') {
+      log(`${label}: skip (/user/* excluded)`, { currentUrl, normalizedPath, segments });
+      return;
+    }
+
+    if (!SC_BASE_PATH_RE.test(location.pathname)) {
+      log(`${label}: skip (not exact /{seg1}/{seg2})`, { currentUrl, normalizedPath, segments });
       return;
     }
 
@@ -725,6 +740,315 @@
     } else {
       location.assign(newUrl);
     }
+  }
+
+  // ==============================
+  // Phase: Rakusta
+  // ==============================
+  function findRakustaLoadingTarget() {
+    const clickableSelector = 'a, button, [role="button"]';
+    const clickable = Array.from(document.querySelectorAll(clickableSelector));
+
+    const collectByPhrases = (phrases) => {
+      const fromSpan = Array.from(document.querySelectorAll('span'))
+        .map((span) => {
+          const text = normalizeText(span.innerText || span.textContent || '');
+          if (!phrases.some((p) => text.includes(p))) return null;
+          return span.closest(clickableSelector);
+        })
+        .filter(Boolean);
+
+      const fromClickable = clickable.filter((el) => {
+        const text = normalizeText(el.innerText || el.textContent || '');
+        return phrases.some((p) => text.includes(p));
+      });
+
+      const merged = Array.from(new Set(fromSpan.concat(fromClickable)));
+      const filtered = merged
+        .filter((el) => !el.closest('footer'))
+        .filter((el) => getElementIssues(el).length === 0);
+
+      const mainFiltered = filtered.filter((el) => !!el.closest('main'));
+      return mainFiltered.length > 0 ? mainFiltered : filtered;
+    };
+
+    const primaryCandidates = collectByPhrases(['抽選結果を見る']);
+    if (primaryCandidates.length === 1) {
+      return { target: primaryCandidates[0], mode: 'primary', candidates: primaryCandidates };
+    }
+    if (primaryCandidates.length > 1) {
+      return { target: null, mode: 'ambiguous', candidates: primaryCandidates };
+    }
+
+    const fallbackCandidates = collectByPhrases(['結果を見る', '結果を確認する']);
+    if (fallbackCandidates.length === 1) {
+      return { target: fallbackCandidates[0], mode: 'fallback', candidates: fallbackCandidates };
+    }
+    if (fallbackCandidates.length > 1) {
+      return { target: null, mode: 'ambiguous', candidates: fallbackCandidates };
+    }
+
+    return { target: null, mode: 'none', candidates: [] };
+  }
+
+  function runRakustaLoadingPhase() {
+    const label = 'RAKUSTA_LOADING';
+    state.phase = `${label}:init`;
+
+    const guardKey = `${RAKUSTA_LOADING_GUARD_PREFIX}${location.pathname}${location.search}`;
+    state.guardKey = guardKey;
+    if (sessionStorage.getItem(guardKey)) {
+      log(`${label}: guard skip`);
+      return;
+    }
+
+    let ambiguousLogged = false;
+
+    const findFn = () => {
+      const result = findRakustaLoadingTarget();
+      state.lastCandidateCount = (result.candidates || []).length;
+
+      if (result.mode === 'ambiguous') {
+        if (!ambiguousLogged) {
+          const snippets = (result.candidates || []).slice(0, 5).map((el) =>
+            truncateText(normalizeText(el.innerText || el.textContent || ''), 20)
+          );
+          log(`${label}: multiple candidates found. suppress auto click for safety`, {
+            count: result.candidates.length,
+            snippets
+          });
+          ambiguousLogged = true;
+        }
+        return null;
+      }
+      ambiguousLogged = false;
+      return result.target;
+    };
+
+    const scheduleClick = () => {
+      if (sessionStorage.getItem(guardKey)) {
+        log(`${label}: guard skip`);
+        return;
+      }
+
+      const found = findFn();
+      if (!found) {
+        info(`${label}: target not found at scheduling time`);
+        return;
+      }
+
+      const waitMs = Math.floor(Math.random() * 1001) + 500; // 500-1500ms
+      log(`${label}: target found. scheduling click`, { waitMs });
+      setTimeout(() => {
+        const el = findFn();
+        if (!el) {
+          info(`${label}: target disappeared before click.`);
+          return;
+        }
+
+        sessionStorage.setItem(guardKey, Date.now().toString());
+        state.phase = `${label}:click`;
+        clickWithFallback(el).then((ok) => {
+          const text = truncateText(normalizeText(el.innerText || el.textContent || ''), 20);
+          log(`${label}: click attempted`, { success: ok, tagName: el.tagName, text });
+          state.phase = `${label}:done`;
+        });
+      }, waitMs);
+    };
+
+    const initial = findFn();
+    if (initial) {
+      scheduleClick();
+      return;
+    }
+
+    startObserver({
+      label,
+      findFn,
+      timeoutMs: OBSERVER_TIMEOUT_MS,
+      onFound: () => {
+        scheduleClick();
+      }
+    });
+  }
+
+  function runRakustaPhase() {
+    const label = 'RAKUSTA';
+    state.phase = `${label}:init`;
+
+    const guardKey = getGuardKey(RAKUSTA_GUARD_PREFIX);
+    state.guardKey = guardKey;
+    if (sessionStorage.getItem(guardKey)) {
+      log(`${label}: guard skip`);
+      return;
+    }
+
+    let ambiguousLogged = false;
+
+    const classifyRakustaEntryText = (text) => {
+      if (!text) return null;
+      if (text.includes('抽選結果を見る')) return null;
+      if (text.includes('抽選に参加する')) return 'participate_text';
+      if (text.includes('結果を確認する')) return 'confirm_result';
+      if (/で参加する$/.test(text)) return 'username_join';
+      return null;
+    };
+
+    const findEntryResult = () => {
+      const clickableSelector = 'a, button, [role="button"]';
+      const clickable = Array.from(document.querySelectorAll(clickableSelector));
+
+      const fromSpan = Array.from(document.querySelectorAll('span'))
+        .map((span) => {
+          const text = normalizeText(span.innerText || span.textContent || '');
+          const matchType = classifyRakustaEntryText(text);
+          if (!matchType) return null;
+          const target = span.closest(clickableSelector);
+          if (!target) return null;
+          return { target, matchType };
+        })
+        .filter(Boolean);
+
+      const fromClickable = clickable
+        .map((el) => {
+          const text = normalizeText(el.innerText || el.textContent || '');
+          const matchType = classifyRakustaEntryText(text);
+          if (!matchType) return null;
+          return { target: el, matchType };
+        })
+        .filter(Boolean);
+
+      const merged = Array.from(new Map(fromSpan.concat(fromClickable).map((x) => [x.target, x])).values());
+      const filtered = merged.filter(({ target }) => {
+        if (target.closest('footer')) return false;
+        const issues = getElementIssues(target);
+        return issues.length === 0;
+      });
+
+      state.lastCandidateCount = filtered.length;
+      if (filtered.length === 1) return { target: filtered[0].target, matchType: filtered[0].matchType, mode: 'single' };
+      if (filtered.length > 1) return { target: null, matchType: null, mode: 'ambiguous', candidates: filtered };
+      return { target: null, matchType: null, mode: 'none', candidates: filtered };
+    };
+
+    const findFn = () => {
+      const result = findEntryResult();
+      if (result.mode === 'ambiguous') {
+        if (!ambiguousLogged) {
+          const snippets = (result.candidates || []).slice(0, 5).map(({ target }) =>
+            truncateText(normalizeText(target.innerText || target.textContent || ''), 20)
+          );
+          log(`${label}: multiple candidates found. suppress auto click for safety`, {
+            count: result.candidates.length,
+            snippets
+          });
+          ambiguousLogged = true;
+        }
+        return null;
+      }
+      ambiguousLogged = false;
+
+      if (!result.target) {
+        if (DEBUG) {
+          const candidates = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+          dumpCandidates(label, candidates, MAX_DUMP_CANDIDATES, (el) => {
+            const text = normalizeText(el.innerText || el.textContent || '');
+            const issues = getElementIssues(el);
+            if (el.closest('footer')) issues.push('in_footer');
+            if (!classifyRakustaEntryText(text)) issues.push('text_mismatch');
+            return elementInfo(el, issues);
+          });
+        } else {
+          info(`${label}: no target found.`);
+        }
+      }
+
+      return result.target;
+    };
+
+    const scheduleClick = () => {
+      if (sessionStorage.getItem(guardKey)) {
+        log(`${label}: guard skip`);
+        return;
+      }
+
+      const found = findFn();
+      if (!found) {
+        info(`${label}: target not found at scheduling time`);
+        return;
+      }
+
+      log(`${label}: scheduling fixed click after ${RAKUSTA_DELAY_MS}ms`);
+      setTimeout(() => {
+        const result = findEntryResult();
+        if (!result.target) {
+          info(`${label}: target disappeared before click.`);
+          return;
+        }
+
+        sessionStorage.setItem(guardKey, Date.now().toString());
+        state.phase = `${label}:click`;
+        clickWithFallback(result.target).then((ok) => {
+          if (result.matchType === 'participate_text') {
+            log(`${label}: matched by "抽選に参加する"`);
+          } else if (result.matchType === 'username_join') {
+            log(`${label}: matched by "/で参加する$/"`);
+          } else if (result.matchType === 'confirm_result') {
+            log(`${label}: matched by "結果を確認する"`);
+          }
+          info(`${label}: click attempted. success=${ok}`);
+          state.phase = `${label}:done`;
+        });
+      }, RAKUSTA_DELAY_MS);
+    };
+
+    const found = findFn();
+    if (found) {
+      scheduleClick();
+      return;
+    }
+
+    startObserver({
+      label,
+      findFn,
+      timeoutMs: OBSERVER_TIMEOUT_MS,
+      onFound: () => {
+        scheduleClick();
+      }
+    });
+  }
+
+  // ==============================
+  // Phase: BBF Auto Scroll
+  // ==============================
+  function runBbfAutoScroll() {
+    const label = 'BBF_AUTOSCROLL';
+    const guardKey = `${BBF_AUTOSCROLL_GUARD_PREFIX}${location.pathname}${location.search}`;
+    state.phase = `${label}:init`;
+    state.guardKey = guardKey;
+
+    if (sessionStorage.getItem(guardKey)) {
+      log(`${label}: skip (guard hit)`);
+      return;
+    }
+
+    const doScroll = () => {
+      log(`${label}: start`);
+      window.scrollTo(0, document.body.scrollHeight);
+      setTimeout(() => {
+        window.scrollTo(0, document.body.scrollHeight);
+        sessionStorage.setItem(guardKey, '1');
+        state.phase = `${label}:done`;
+        log(`${label}: done`);
+      }, 500);
+    };
+
+    if (document.readyState === 'complete') {
+      doScroll();
+      return;
+    }
+
+    window.addEventListener('load', doScroll, { once: true });
   }
 
   // ==============================
@@ -794,6 +1118,25 @@
 
       if (host === 'present.social-camp.com') {
         runSocialCampLotteryRedirectPhase();
+        return;
+      }
+
+      if (host === 'bbf.shuttlerock.com') {
+        runBbfAutoScroll();
+        return;
+      }
+
+      if (host === 'x.rakusta.net') {
+        const normalizedPath = normalizePathname(location.pathname);
+        const isCampaignPath = normalizedPath.startsWith(RAKUSTA_PATH_PREFIX);
+        const isLoadingPath = normalizedPath.endsWith('/loading');
+        if (isCampaignPath && isLoadingPath) {
+          runRakustaLoadingPhase();
+        } else if (isCampaignPath) {
+          runRakustaPhase();
+        } else {
+          log('RAKUSTA: not /campaign/* path, skip.');
+        }
         return;
       }
 
