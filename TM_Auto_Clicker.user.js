@@ -1,11 +1,10 @@
 // ==UserScript==
 // @name         TM Auto Clicker (gcp.giftee.biz + x.com)
 // @namespace    https://example.local/
-// @version      1.0.7
+// @version      1.0.8
 // @description  Auto click with debug + safety for gcp.giftee.biz and x.com OAuth2.
 // @match        https://gcp.giftee.biz/*
 // @match        https://x.com/*
-// @match        https://present.social-camp.com/*
 // @match        https://bbf.shuttlerock.com/*
 // @match        https://x.rakusta.net/*
 // @run-at       document-idle
