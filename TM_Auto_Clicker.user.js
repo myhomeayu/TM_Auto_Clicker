@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         TM Auto Clicker (gcp.giftee.biz + x.com)
 // @namespace    https://example.local/
-// @version      1.0.8
-// @description  Auto click with debug + safety for gcp.giftee.biz and x.com OAuth2.
+// @version      1.0.9
+// @description  Auto click with debug + safety for gcp.giftee.biz, x.com OAuth2, and api.x.com OAuth.
 // @match        https://gcp.giftee.biz/*
 // @match        https://x.com/*
+// @match        https://api.x.com/oauth/authorize*
 // @match        https://bbf.shuttlerock.com/*
 // @match        https://x.rakusta.net/*
 // @run-at       document-idle
@@ -41,6 +42,7 @@
   const X_DELAY_MIN_MS = 1800;
   const X_DELAY_MAX_MS = 2600;
   const X_GUARD_PREFIX = 'tm_autoclick_xoauth:';
+  const X_API_ALLOW_GUARD_PREFIX = 'tm_autoclick_xapi_allow:';
   // Social Camp redirect
   const SC_REDIRECT_GUARD_PREFIX = 'tm_autoclick_scjump:';
   const SC_REDIRECT_USE_REPLACE = true;
@@ -689,6 +691,101 @@
   }
 
   // ==============================
+  // Phase: api.x.com OAuth (legacy)
+  // ==============================
+  function runXApiOAuthPhase() {
+    const label = 'X_API_OAUTH';
+    state.phase = `${label}:init`;
+
+    const guardKey = `${X_API_ALLOW_GUARD_PREFIX}${location.href}`;
+    state.guardKey = guardKey;
+
+    const isAllowedValue = (value) => {
+      const s = normalizeText(value || '');
+      return s.includes('連携アプリを認証') || s.includes('Authorize app');
+    };
+
+    const isAllowedText = (text) => {
+      const s = normalizeText(text || '');
+      return s.includes('Authorize app') || s.includes('連携アプリを認証');
+    };
+
+    const findFn = () => {
+      const byId = document.querySelector('#allow');
+      if (byId) {
+        state.lastCandidateCount = 1;
+        const issues = getElementIssues(byId);
+        if (issues.length === 0) return byId;
+        if (DEBUG) log(`${label}: #allow skipped`, elementInfo(byId, issues));
+      }
+
+      const inputCandidates = Array.from(document.querySelectorAll('input[type="submit"]'));
+      const matchedInput = inputCandidates.find((el) => {
+        const issues = getElementIssues(el);
+        if (issues.length > 0) return false;
+        return isAllowedValue(el.value);
+      });
+      if (matchedInput) {
+        state.lastCandidateCount = inputCandidates.length;
+        return matchedInput;
+      }
+
+      const buttonLike = Array.from(document.querySelectorAll('button, a, div[role="button"], a[role="button"]'));
+      const matchedButtonLike = buttonLike.find((el) => {
+        const issues = getElementIssues(el);
+        if (issues.length > 0) return false;
+        return isAllowedText(el.innerText || el.textContent || '');
+      });
+
+      state.lastCandidateCount = 1 + inputCandidates.length + buttonLike.length;
+      if (matchedButtonLike) return matchedButtonLike;
+
+      if (DEBUG) {
+        const dumpList = byId
+          ? [byId].concat(inputCandidates).concat(buttonLike)
+          : inputCandidates.concat(buttonLike);
+        dumpCandidates(label, dumpList, MAX_DUMP_CANDIDATES, (el) => {
+          const issues = getElementIssues(el);
+          const infoObj = elementInfo(el, issues);
+          if (el.tagName === 'INPUT') {
+            infoObj.value = truncateText(el.value || '', 50);
+          }
+          return infoObj;
+        });
+      } else {
+        info(`${label}: no target found.`);
+      }
+
+      return null;
+    };
+
+    const found = findFn();
+    if (found) {
+      scheduleAutoClickFixed({
+        label,
+        findFn,
+        delayMs: X_FIXED_DELAY_MS,
+        guardKey
+      });
+      return;
+    }
+
+    startObserver({
+      label,
+      findFn,
+      timeoutMs: OBSERVER_TIMEOUT_MS,
+      onFound: () => {
+        scheduleAutoClickFixed({
+          label,
+          findFn,
+          delayMs: X_FIXED_DELAY_MS,
+          guardKey
+        });
+      }
+    });
+  }
+
+  // ==============================
   // Phase: Social Camp Lottery Redirect
   // ==============================
   function runSocialCampLotteryRedirectPhase() {
@@ -1111,6 +1208,17 @@
           runXOAuthPhase();
         } else {
           log('X: path or client_id not matched, skip.');
+        }
+        return;
+      }
+
+      if (host === 'api.x.com') {
+        const okPath = location.pathname === '/oauth/authorize';
+        const hasOauthToken = new URLSearchParams(location.search).has('oauth_token');
+        if (okPath && hasOauthToken) {
+          runXApiOAuthPhase();
+        } else {
+          log('X API: path or oauth_token not matched, skip.');
         }
         return;
       }
