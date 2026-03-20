@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TM Auto Clicker (gcp.giftee.biz + x.com)
 // @namespace    https://example.local/
-// @version      1.0.9
-// @description  Auto click with debug + safety for gcp.giftee.biz, x.com OAuth2, and api.x.com OAuth.
+// @version      1.0.10
+// @description  Auto click with debug + safety for gcp.giftee.biz, x.com OAuth2, and api.x.com OAuth. GCP special campaign "抽選する" support.
 // @match        https://gcp.giftee.biz/*
 // @match        https://x.com/*
 // @match        https://api.x.com/oauth/authorize*
@@ -569,24 +569,30 @@
     state.phase = `${label}:init`;
 
     const guardKey = getGuardKey(GCP_GUARD_PREFIX);
+    const gcpJoinHrefIncludes = '/authentications/auth/';
+    const gcpJoinTextMatchers = ['参加する', '抽選する'];
 
     const findFn = () => {
-      const elements = document.querySelectorAll('a[href*="/authentications/auth/"]');
-      state.lastCandidateCount = elements.length;
-
-      const candidates = Array.from(elements);
+      const selectorList = [
+        `a[href*="${gcpJoinHrefIncludes}"]`,
+        `a[data-method="post"][href*="${gcpJoinHrefIncludes}"]`
+      ];
+      const candidates = Array.from(new Set(
+        selectorList.flatMap((selector) => Array.from(document.querySelectorAll(selector)))
+      ));
+      state.lastCandidateCount = candidates.length;
       const target = findBestCandidate({
         candidates,
-        textMatchers: ['参加する'],
-        hrefIncludes: '/authentications/auth/'
+        textMatchers: gcpJoinTextMatchers,
+        hrefIncludes: gcpJoinHrefIncludes
       });
 
       if (!target) {
         if (DEBUG) {
           dumpCandidates(label, candidates, MAX_DUMP_CANDIDATES, (el) => {
             const issues = getElementIssues(el, {
-              textMatchers: ['参加する'],
-              requireHrefIncludes: '/authentications/auth/'
+              textMatchers: gcpJoinTextMatchers,
+              requireHrefIncludes: gcpJoinHrefIncludes
             });
             return elementInfo(el, issues);
           });
