@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Auto Clicker (gcp.giftee.biz + x.com)
 // @namespace    https://example.local/
-// @version      1.0.10
+// @version      1.0.11
 // @description  Auto click with debug + safety for gcp.giftee.biz, x.com OAuth2, and api.x.com OAuth. GCP special campaign "抽選する" support.
 // @match        https://gcp.giftee.biz/*
 // @match        https://x.com/*
@@ -55,6 +55,7 @@
   const RAKUSTA_LOADING_GUARD_PREFIX = 'tm_rakusta_loading_clicked:';
   const RAKUSTA_PATH_PREFIX = '/campaign/';
   const RAKUSTA_DELAY_MS = 1000;
+  const RAKUSTA_ROUTE_POLL_MS = 250;
 
   const OBSERVER_TIMEOUT_MS = 60000;
   const MAX_ATTEMPTS_PER_PAGE = 3;
@@ -897,6 +898,7 @@
     const label = 'RAKUSTA_LOADING';
     state.phase = `${label}:init`;
 
+    const phaseUrl = `${location.pathname}${location.search}`;
     const guardKey = `${RAKUSTA_LOADING_GUARD_PREFIX}${location.pathname}${location.search}`;
     state.guardKey = guardKey;
     if (sessionStorage.getItem(guardKey)) {
@@ -907,6 +909,8 @@
     let ambiguousLogged = false;
 
     const findFn = () => {
+      if (`${location.pathname}${location.search}` !== phaseUrl) return null;
+
       const result = findRakustaLoadingTarget();
       state.lastCandidateCount = (result.candidates || []).length;
 
@@ -978,6 +982,7 @@
     const label = 'RAKUSTA';
     state.phase = `${label}:init`;
 
+    const phaseUrl = `${location.pathname}${location.search}`;
     const guardKey = getGuardKey(RAKUSTA_GUARD_PREFIX);
     state.guardKey = guardKey;
     if (sessionStorage.getItem(guardKey)) {
@@ -1034,6 +1039,10 @@
     };
 
     const findFn = () => {
+      // This observer can survive a client-side transition to /loading.
+      // Leave result-button handling to runRakustaLoadingPhase in that case.
+      if (`${location.pathname}${location.search}` !== phaseUrl) return null;
+
       const result = findEntryResult();
       if (result.mode === 'ambiguous') {
         if (!ambiguousLogged) {
@@ -1082,6 +1091,11 @@
 
       log(`${label}: scheduling fixed click after ${RAKUSTA_DELAY_MS}ms`);
       setTimeout(() => {
+        if (`${location.pathname}${location.search}` !== phaseUrl) {
+          info(`${label}: route changed before click.`);
+          return;
+        }
+
         const result = findEntryResult();
         if (!result.target) {
           info(`${label}: target disappeared before click.`);
@@ -1118,6 +1132,24 @@
         scheduleClick();
       }
     });
+  }
+
+  function installRakustaRouteWatcher() {
+    if (location.host !== 'x.rakusta.net') return;
+
+    let lastUrl = location.href;
+    setInterval(() => {
+      const currentUrl = location.href;
+      if (currentUrl === lastUrl) return;
+
+      const previousUrl = lastUrl;
+      lastUrl = currentUrl;
+      log('RAKUSTA: client-side URL change detected', { previousUrl, currentUrl });
+
+      // Rakusta changes campaign phases without reloading the document.
+      // Re-run routing so /loading gets its dedicated result-button observer.
+      main(false);
+    }, RAKUSTA_ROUTE_POLL_MS);
   }
 
   // ==============================
@@ -1268,5 +1300,6 @@
     }
   }
 
+  installRakustaRouteWatcher();
   main(false);
 })();
