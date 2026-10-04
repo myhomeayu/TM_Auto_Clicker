@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TM Auto Clicker (gcp.giftee.biz + x.com)
 // @namespace    https://example.local/
-// @version      1.0.11
+// @version      1.0.12
 // @description  Auto click with debug + safety for gcp.giftee.biz, x.com OAuth2, and api.x.com OAuth. GCP special campaign "抽選する" support.
 // @match        https://gcp.giftee.biz/*
 // @match        https://x.com/*
@@ -635,66 +635,130 @@
   // ==============================
   // Phase: X OAuth2
   // ==============================
+  // X OAuth2 uses its own persistent watcher; other site handlers are unchanged.
+  let xOAuthController = null;
   function runXOAuthPhase() {
+    if (xOAuthController) xOAuthController.stop();
     const label = 'XOAuth';
-    state.phase = `${label}:init`;
+    const startUrl = location.href;
+    const guardKey = getGuardKey(X_GUARD_PREFIX) + ':v2';
+    const startedAt = Date.now();
+    const STABLE_MS = 1000;
+    const RETRY_MS = 5000;
+    const MAX_CLICKS = 5;
+    const TIMEOUT_MS = 90000;
+    let stopped = false;
+    let attempts = 0;
+    let clickedAt = 0;
+    let lastMutation = Date.now();
+    let lastResource = Date.now();
+    let candidate = null;
+    let candidateSince = Date.now();
+    let observer;
+    let resourceObserver;
+    let timer;
+    state.guardKey = guardKey;
+    state.phase = `${label}:waiting`;
 
-    const guardKey = getGuardKey(X_GUARD_PREFIX);
-
-    const findFn = () => {
-      const elements = document.querySelectorAll('button, div[role="button"], a[role="button"]');
-      state.lastCandidateCount = elements.length;
-
-      const candidates = Array.from(elements);
-
-      // Prefer earlier matcher
-      let target = null;
-      for (const matcher of X_TEXT_MATCHERS) {
-        target = candidates.find((el) => {
-          const issues = getElementIssues(el, { textMatchers: [matcher] });
-          return issues.length === 0;
-        });
-        if (target) break;
-      }
-
-      if (!target) {
-        if (DEBUG) {
-          dumpCandidates(label, candidates, MAX_DUMP_CANDIDATES, (el) => {
-            const issues = getElementIssues(el, { textMatchers: X_TEXT_MATCHERS });
-            return elementInfo(el, issues);
-          });
-        } else {
-          info(`${label}: no target found.`);
-        }
-      }
-
-      return target;
+    const onPageHide = () => {
+      // Unloading alone is not proof of authorization (refresh/close also unload).
+      stop();
     };
-
-    const found = findFn();
-    if (found) {
-      scheduleAutoClickFixed({
-        label,
-        findFn,
-        delayMs: X_FIXED_DELAY_MS,
-        guardKey
-      });
-      return;
+    function stop() {
+      stopped = true;
+      clearInterval(timer);
+      if (observer) observer.disconnect();
+      if (resourceObserver) resourceObserver.disconnect();
+      window.removeEventListener('pagehide', onPageHide);
+      state.observerActive = false;
     }
-
-    startObserver({
-      label,
-      findFn,
-      timeoutMs: OBSERVER_TIMEOUT_MS,
-      onFound: () => {
-        scheduleAutoClickFixed({
-          label,
-          findFn,
-          delayMs: X_FIXED_DELAY_MS,
-          guardKey
-        });
+    function markTransition() {
+      // Only a same-document departure from this OAuth route is observable here.
+      // Full navigation destroys this script; do not create a speculative guard.
+      if (location.pathname !== '/i/oauth2/authorize') {
+        try { sessionStorage.setItem(guardKey, Date.now().toString()); } catch (_) {}
+        state.phase = `${label}:left_authorize_page`;
+      } else {
+        state.phase = `${label}:request_changed`;
       }
+      stop();
+    }
+    function findButton() {
+      const els = Array.from(document.querySelectorAll('button, div[role="button"], a[role="button"]'));
+      state.lastCandidateCount = els.length;
+      // Exact labels only: never match a cancel/help button containing "許可".
+      const labels = ['アプリにアクセスを許可', 'Authorize app', 'Authorize App', 'Allow', '許可', 'Authorize'];
+      for (const text of labels) {
+        const el = els.find((item) =>
+          normalizeText(item.innerText || item.textContent || '') === text &&
+          item.isConnected && getElementIssues(item).length === 0 &&
+          !item.closest('[inert], [aria-disabled="true"]') &&
+          window.getComputedStyle(item).pointerEvents !== 'none');
+        if (el) return el;
+      }
+      return null;
+    }
+    function tick() {
+      if (stopped) return;
+      try {
+        if (location.href !== startUrl) {
+          if (attempts > 0) markTransition();
+          else stop();
+          return;
+        }
+        const now = Date.now();
+        if (now - startedAt >= TIMEOUT_MS) {
+          state.phase = `${label}:timeout`;
+          warn(`${label}: readiness/navigation timeout; stopped.`);
+          stop();
+          return;
+        }
+        if (clickedAt && now - clickedAt < RETRY_MS) return;
+        if (attempts >= MAX_CLICKS) {
+          state.phase = `${label}:max_attempts`;
+          warn(`${label}: no confirmed transition after ${attempts} clicks.`);
+          stop();
+          return;
+        }
+        const el = findButton();
+        if (el !== candidate) {
+          candidate = el;
+          candidateSince = now;
+        }
+        if (!el || document.readyState !== 'complete') return;
+        // Resource timing signals completed requests, not ALL in-flight traffic.
+        // Background X traffic can continue indefinitely; readiness is heuristic.
+        if (now - Math.max(lastMutation, lastResource, candidateSince) < STABLE_MS) return;
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const rect = el.getBoundingClientRect();
+        const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        if (!top || !(top === el || el.contains(top))) return;
+        if (!el.isConnected || getElementIssues(el).length) return;
+        attempts += 1;
+        state.attempts = attempts;
+        clickedAt = now;
+        state.phase = `${label}:awaiting_transition`;
+        // No success guard before clicking. A dispatched event isn't acceptance.
+        el.click();
+        info(`${label}: click #${attempts}; waiting for navigation.`);
+      } catch (e) {
+        state.lastError = e.message || String(e);
+        warn(`${label}:`, state.lastError);
+      }
+    }
+    observer = new MutationObserver(() => { lastMutation = Date.now(); });
+    observer.observe(document.documentElement, {
+      subtree: true, childList: true, attributes: true, characterData: true
     });
+    try {
+      resourceObserver = new PerformanceObserver(() => { lastResource = Date.now(); });
+      resourceObserver.observe({ type: 'resource', buffered: false });
+    } catch (_) { /* Resource timing unavailable: use DOM and load checks. */ }
+    state.observerActive = true;
+    xOAuthController = { stop };
+    window.addEventListener('pagehide', onPageHide);
+    timer = setInterval(tick, 250);
+    tick();
   }
 
   // ==============================
@@ -1301,5 +1365,15 @@
   }
 
   installRakustaRouteWatcher();
+  if (location.host === 'x.com') {
+    let previousXUrl = location.href;
+    setInterval(() => {
+      if (location.href === previousXUrl) return;
+      previousXUrl = location.href;
+      if (xOAuthController) xOAuthController.stop();
+      if (location.pathname === '/i/oauth2/authorize' &&
+          new URLSearchParams(location.search).has('client_id')) runXOAuthPhase();
+    }, 250);
+  }
   main(false);
 })();
